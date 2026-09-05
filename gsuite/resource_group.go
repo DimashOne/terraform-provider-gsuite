@@ -119,7 +119,7 @@ func resourceGroupCreate(d *schema.ResourceData, meta interface{}) error {
 	aliasesCount := d.Get("aliases.#").(int)
 	for i := 0; i < aliasesCount; i++ {
 		cfgAlias := d.Get(fmt.Sprintf("aliases.%d", i)).(string)
-		err = retry(func() error {
+		err = retryNotFoundOrForbidden(func() error {
 			alias := &directory.Alias{
 				Alias: cfgAlias,
 			}
@@ -213,7 +213,7 @@ func resourceGroupUpdate(d *schema.ResourceData, meta interface{}) error {
 	aliasesCount := d.Get("aliases.#").(int)
 	for i := 0; i < aliasesCount; i++ {
 		cfgAlias := d.Get(fmt.Sprintf("aliases.%d", i)).(string)
-		err = retry(func() error {
+		err = retryNotFoundOrForbidden(func() error {
 			alias := &directory.Alias{
 				Alias: cfgAlias,
 			}

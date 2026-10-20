@@ -119,7 +119,7 @@ func resourceGroupCreate(d *schema.ResourceData, meta interface{}) error {
 	aliasesCount := d.Get("aliases.#").(int)
 	for i := 0; i < aliasesCount; i++ {
 		cfgAlias := d.Get(fmt.Sprintf("aliases.%d", i)).(string)
-		err = retry(func() error {
+		err = retryNotFoundOrForbidden(func() error {
 			alias := &directory.Alias{
 				Alias: cfgAlias,
 			}
@@ -186,44 +186,70 @@ func resourceGroupUpdate(d *schema.ResourceData, meta interface{}) error {
 	// in case we were updating an existing we set the id back to the API ID
 	d.SetId(updatedGroup.Id)
 
-	// Handle group aliases
+	// Read the editable aliases from Directory rather than relying on stale state.
 	var aliasesResponse *directory.Aliases
 	err = retry(func() error {
 		aliasesResponse, err = config.directory.Groups.Aliases.List(d.Id()).Do()
 		return err
 	}, config.TimeoutMinutes)
-
 	if err != nil {
 		return fmt.Errorf("[ERROR] Could not list group aliases: %s", err)
 	}
 
-	for _, v := range aliasesResponse.Aliases {
-		c, ok := v.(map[string]interface{})
-		if ok {
-			alias := c["alias"].(string)
-			log.Printf("[DEBUG] Removing alias: %s", alias)
-			err = config.directory.Groups.Aliases.Delete(d.Id(), alias).Do()
+	currentAliases := make(map[string]bool)
+	var currentOrder []string
+	for _, value := range aliasesResponse.Aliases {
+		item, ok := value.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("[ERROR] Unexpected group alias response")
+		}
+		alias, ok := item["alias"].(string)
+		if !ok || alias == "" {
+			return fmt.Errorf("[ERROR] Missing alias address in group alias response")
+		}
+		alias = strings.ToLower(alias)
+		if !currentAliases[alias] {
+			currentOrder = append(currentOrder, alias)
+			currentAliases[alias] = true
 		}
 	}
 
-	if err != nil {
-		return fmt.Errorf("[ERROR] Error removing group aliases: %s", err)
-	}
-
+	desiredAliases := make(map[string]bool)
+	var desiredOrder []string
 	aliasesCount := d.Get("aliases.#").(int)
 	for i := 0; i < aliasesCount; i++ {
-		cfgAlias := d.Get(fmt.Sprintf("aliases.%d", i)).(string)
-		err = retry(func() error {
-			alias := &directory.Alias{
-				Alias: cfgAlias,
-			}
-			_, err = config.directory.Groups.Aliases.Insert(d.Id(), alias).Do()
-			return err
-		}, config.TimeoutMinutes)
+		alias := strings.ToLower(d.Get(fmt.Sprintf("aliases.%d", i)).(string))
+		if !desiredAliases[alias] {
+			desiredOrder = append(desiredOrder, alias)
+			desiredAliases[alias] = true
+		}
 	}
 
-	if err != nil {
-		return fmt.Errorf("[ERROR] Error creating group aliases: %s", err)
+	// Add replacements before removing old aliases. If an insert fails, keep
+	// all existing addresses so that the next apply can retry safely.
+	for _, alias := range desiredOrder {
+		if currentAliases[alias] {
+			continue
+		}
+		log.Printf("[DEBUG] Adding alias: %s", alias)
+		err = retryNotFoundOrForbidden(func() error {
+			_, err := config.directory.Groups.Aliases.Insert(d.Id(), &directory.Alias{Alias: alias}).Do()
+			return err
+		}, config.TimeoutMinutes)
+		if err != nil {
+			return fmt.Errorf("[ERROR] Error creating group alias %s: %w", alias, err)
+		}
+	}
+
+	// The intersection of current and desired aliases is never mutated.
+	for _, alias := range currentOrder {
+		if desiredAliases[alias] {
+			continue
+		}
+		log.Printf("[DEBUG] Removing alias: %s", alias)
+		if err := config.directory.Groups.Aliases.Delete(d.Id(), alias).Do(); err != nil {
+			return fmt.Errorf("[ERROR] Error removing group alias %s: %w", alias, err)
+		}
 	}
 
 	log.Printf("[INFO] Updated group: %s", updatedGroup.Email)

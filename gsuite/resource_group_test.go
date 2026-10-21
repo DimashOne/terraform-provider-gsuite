@@ -24,6 +24,60 @@ func (f groupAliasTransport) RoundTrip(r *http.Request) (*http.Response, error) 
 	return f(r)
 }
 
+func TestResourceGroupCreateStopsOnAliasError(t *testing.T) {
+	const failedAlias = "failed@omio.com"
+	var aliasCalls []string
+	client := &http.Client{Transport: groupAliasTransport(func(r *http.Request) (*http.Response, error) {
+		status := http.StatusOK
+		var payload interface{} = &directory.Group{Id: "group-id", Email: "pod-test@omio.com"}
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/groups"):
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/groups/group-id"):
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/groups/group-id/aliases"):
+			var alias directory.Alias
+			if err := json.NewDecoder(r.Body).Decode(&alias); err != nil {
+				return nil, err
+			}
+			aliasCalls = append(aliasCalls, alias.Alias)
+			payload = &alias
+			if alias.Alias == failedAlias {
+				status = http.StatusBadRequest
+				payload = map[string]interface{}{"error": map[string]interface{}{
+					"code": status, "message": "alias creation failed",
+				}}
+			}
+		default:
+			return nil, fmt.Errorf("unexpected Directory request: %s %s", r.Method, r.URL.Path)
+		}
+		body, err := json.Marshal(payload)
+		if err != nil {
+			return nil, err
+		}
+		return &http.Response{
+			StatusCode: status,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       ioutil.NopCloser(bytes.NewReader(body)),
+		}, nil
+	})}
+	service, err := directory.NewService(context.Background(), option.WithHTTPClient(client))
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := schema.TestResourceDataRaw(t, resourceGroup().Schema, map[string]interface{}{
+		"email": "pod-test@omio.com", "aliases": []interface{}{failedAlias, "later@omio.com"},
+	})
+	err = resourceGroupCreate(data, &Config{directory: service, TimeoutMinutes: 1})
+	if err == nil || !strings.Contains(err.Error(), failedAlias) {
+		t.Errorf("expected an error identifying %s, got %v", failedAlias, err)
+	}
+	if !reflect.DeepEqual(aliasCalls, []string{failedAlias}) {
+		t.Errorf("alias calls = %v, want only %s", aliasCalls, failedAlias)
+	}
+	if data.Id() != "group-id" {
+		t.Errorf("created group ID = %q, want group-id", data.Id())
+	}
+}
+
 func TestResourceGroupUpdateAliases(t *testing.T) {
 	const legacy = "tribe-core-xp-pod-payments@omio.com"
 	const old = "old-payments@omio.com"

@@ -126,10 +126,9 @@ func resourceGroupCreate(d *schema.ResourceData, meta interface{}) error {
 			_, err = config.directory.Groups.Aliases.Insert(d.Id(), alias).Do()
 			return err
 		}, config.TimeoutMinutes)
-	}
-
-	if err != nil {
-		return fmt.Errorf("[ERROR] Error creating group aliases: %s", err)
+		if err != nil {
+			return fmt.Errorf("[ERROR] Error creating group alias %s: %w", cfgAlias, err)
+		}
 	}
 
 	return resourceGroupRead(d, meta)

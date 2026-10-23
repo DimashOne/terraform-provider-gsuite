@@ -28,22 +28,37 @@ func handleNotFoundError(err error, d *schema.ResourceData, resource string) err
 }
 
 func retry(retryFunc func() error, minutes int) error {
-	return retryTime(retryFunc, minutes, false, false, false)
+	return retryTime(retryFunc, minutes, false, false, false, false)
 }
 
 func retryNotFound(retryFunc func() error, minutes int) error {
-	return retryTime(retryFunc, minutes, true, false, false)
+	return retryTime(retryFunc, minutes, true, false, false, false)
 }
 
 func retryInvalid(retryFunc func() error, minutes int) error {
-	return retryTime(retryFunc, minutes, false, false, true)
+	return retryTime(retryFunc, minutes, false, false, true, false)
 }
 
 func retryPassDuplicate(retryFunc func() error, minutes int) error {
-	return retryTime(retryFunc, minutes, true, true, false)
+	return retryTime(retryFunc, minutes, true, true, false, false)
 }
 
-func retryTime(retryFunc func() error, minutes int, retryNotFound bool, retryPassDuplicate bool, retryInvalid bool) error {
+// retryNotFoundOrForbidden retries on 404 (like retryNotFound) and also on
+// 403. Google's Admin SDK Directory API can transiently return 403 "Not
+// Authorized to access this resource/api, forbidden" for group-alias
+// mutations made shortly after group creation, even though the group itself
+// is already readable — group and alias state appear to propagate
+// independently. Without this, the very first such transient 403 permanently
+// taints the resource (create fails, never retried). Confirmed the identical
+// alias-insert call succeeds when re-run later as a plain update, i.e. this
+// is a propagation-window issue, not a real authorization failure. See
+// DO-6422, and upstream DeviaVir/terraform-provider-gsuite#32 and #148 (same
+// error class, repo archived 2021 before any fix landed).
+func retryNotFoundOrForbidden(retryFunc func() error, minutes int) error {
+	return retryTime(retryFunc, minutes, true, false, false, true)
+}
+
+func retryTime(retryFunc func() error, minutes int, retryNotFound bool, retryPassDuplicate bool, retryInvalid bool, retryForbidden bool) error {
 	wait := 1
 	return resource.Retry(time.Duration(minutes)*time.Minute, func() *resource.RetryError {
 		err := retryFunc()
@@ -93,6 +108,15 @@ func retryTime(retryFunc func() error, minutes int, retryNotFound bool, retryPas
 		if retryNotFound {
 			if gerr, ok := err.(*googleapi.Error); ok && (gerr.Code == 404) {
 				log.Printf("[DEBUG] Retrying for eventual consistency...")
+				time.Sleep(time.Duration(wait)*time.Second + time.Duration(randomNumberMiliseconds)*time.Millisecond)
+				wait = wait * 2
+				return resource.RetryableError(gerr)
+			}
+		}
+
+		if retryForbidden {
+			if gerr, ok := err.(*googleapi.Error); ok && (gerr.Code == 403) {
+				log.Printf("[DEBUG] Retrying for eventual consistency (403)...")
 				time.Sleep(time.Duration(wait)*time.Second + time.Duration(randomNumberMiliseconds)*time.Millisecond)
 				wait = wait * 2
 				return resource.RetryableError(gerr)
